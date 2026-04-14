@@ -34,6 +34,10 @@ Example:
 ## Rules
 - Think step-by-step before each tool call.
 - Call ONE tool per turn — output one JSON block, then wait for the result.
+- Return ONLY one of these two shapes on each turn:
+  1. A single valid tool-call JSON block
+  2. `<ANSWER>...</ANSWER>`
+- Do NOT add free-form analysis, markdown commentary, or extra prose outside the JSON block / `<ANSWER>` tags.
 - Do NOT repeat searches with the same keywords — try different terms if results were poor.
 - Do NOT re-read files already read (the system skips them automatically).
 - Stop when you have enough evidence to answer, or when the budget is exhausted.
@@ -52,6 +56,7 @@ REACT_CONTINUATION_PROMPT = """Based on the tool results above, decide your next
 1. If you have **sufficient evidence** to answer the query, output your answer wrapped in `<ANSWER>...</ANSWER>` tags.
 2. If you need **more information**, call another tool (output the JSON block).
 3. If the budget is nearly exhausted or you've reached the loop limit, synthesize the best answer you can from available evidence.
+4. Output ONLY the JSON block or `<ANSWER>...</ANSWER>` tags. Do not include analysis outside those formats.
 
 Budget remaining: {budget_remaining} tokens | Loop: {loop_count}/{max_loops} | Files read: {files_read_count}
 """

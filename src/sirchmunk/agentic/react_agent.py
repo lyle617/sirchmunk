@@ -185,6 +185,7 @@ class ReActSearchAgent:
 
         tool_names = self.registry.tool_names
         final_answer: Optional[str] = None
+        no_action_streak = 0
 
         # Optionally execute pre-extracted keywords before the first LLM call
         if initial_keywords and "keyword_search" in tool_names:
@@ -235,6 +236,7 @@ class ReActSearchAgent:
             # Check for final answer in response
             answer = _extract_answer(content)
             if answer:
+                no_action_streak = 0
                 final_answer = answer
                 await self._logger.success(f"[ReAct] Answer found at loop {context.loop_count}")
                 break
@@ -243,19 +245,53 @@ class ReActSearchAgent:
             tool_call = _parse_tool_call(content, tool_names)
             if tool_call is None:
                 # LLM didn't call a tool and didn't answer — nudge it
-                await self._logger.warning("[ReAct] No tool call or answer detected, nudging...")
+                no_action_streak += 1
+                await self._logger.warning(
+                    f"[ReAct] No tool call or answer detected, nudging... (streak={no_action_streak})"
+                )
                 messages.append({"role": "assistant", "content": content})
+
+                if no_action_streak >= 3:
+                    await self._logger.warning("[ReAct] Repeated invalid turns — forcing synthesis early")
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "You have failed multiple times to emit a valid tool call or a final answer. "
+                            "Stop searching and synthesize the best answer you can from ALL evidence collected so far. "
+                            "Return ONLY `<ANSWER>...</ANSWER>` with no extra prose."
+                        ),
+                    })
+                    llm_response = await self._call_llm(messages)
+                    content = llm_response.content or ""
+                    usage = llm_response.usage or {}
+                    total_tok = usage.get("total_tokens", 0)
+                    if total_tok == 0:
+                        total_tok = usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0)
+                    context.add_llm_tokens(total_tok, usage=usage if usage else None)
+                    final_answer = _extract_answer(content) or content
+                    break
+
+                preferred_tool = tool_names[0] if tool_names else "keyword_search"
+                retry_hint = (
+                    f'{{"tool": "{preferred_tool}", "arguments": {{...}}}}'
+                    if tool_names
+                    else '{"tool": "keyword_search", "arguments": {"keywords": ["..."]}}'
+                )
                 messages.append({
                     "role": "user",
                     "content": (
-                        "You must either call a tool using the JSON format or provide "
-                        "a final answer in <ANSWER>...</ANSWER> tags. Please try again.\n\n"
+                        "You must respond in exactly one of two ways:\n"
+                        f"1. A single valid tool-call JSON block using one of these tools: {', '.join(tool_names)}\n"
+                        "2. A final answer wrapped in <ANSWER>...</ANSWER>\n\n"
+                        f"Example tool-call shape:\n{retry_hint}\n\n"
+                        "Do not include analysis outside the JSON block or <ANSWER> tags. Please try again.\n\n"
                         f"{self._build_continuation_prompt(context)}"
                     ),
                 })
                 continue
 
             tool_name, tool_args = tool_call
+            no_action_streak = 0
             await self._logger.info(f"[ReAct] Calling tool: {tool_name}({json.dumps(tool_args, ensure_ascii=False)[:200]})")
 
             # Execute the tool
