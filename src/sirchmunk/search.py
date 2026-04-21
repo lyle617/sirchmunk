@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 from sirchmunk.base import BaseSearch
 from sirchmunk.learnings.knowledge_base import KnowledgeBase
 from sirchmunk.llm.openai_chat import OpenAIChat
+from sirchmunk.llm.openai_chat import OpenAIEmptyChoicesError
 from sirchmunk.llm.prompts import (
     KEYWORD_QUERY_PLACEHOLDER,
     generate_keyword_extraction_prompt,
@@ -206,6 +207,10 @@ class AgenticSearch(BaseSearch):
         self.spec_path: Path = self.work_path / ".cache" / "spec"
         self.spec_path.mkdir(parents=True, exist_ok=True)
         self._spec_lock = asyncio.Lock()  # guards concurrent spec writes
+
+    def close(self) -> None:
+        """Release background resources owned by this search instance."""
+        self.knowledge_storage.close()
 
     def update_log_callback(self, log_callback: LogCallback = None) -> None:
         """Replace the per-request log callback on all sub-components.
@@ -1163,6 +1168,11 @@ class AgenticSearch(BaseSearch):
             self._load_spec_context(paths, stale_hours=spec_stale_hours),
             return_exceptions=True,
         )
+        self._raise_provider_failures(
+            phase1_results,
+            labels=["keywords", "dir_scan", "knowledge", "spec_cache"],
+            phase_label="Phase 1",
+        )
 
         kw_result = phase1_results[0] if not isinstance(phase1_results[0], Exception) else ({}, [])
         scan_result = phase1_results[1] if not isinstance(phase1_results[1], Exception) else None
@@ -1208,6 +1218,11 @@ class AgenticSearch(BaseSearch):
             phase2_tasks.append(self._async_noop([]))
 
         phase2_results = await asyncio.gather(*phase2_tasks, return_exceptions=True)
+        self._raise_provider_failures(
+            phase2_results,
+            labels=["keyword_search", "dir_scan_rank"],
+            phase_label="Phase 2",
+        )
 
         keyword_files = phase2_results[0] if not isinstance(phase2_results[0], Exception) else []
         dir_scan_files = phase2_results[1] if not isinstance(phase2_results[1], Exception) else []
@@ -1650,7 +1665,7 @@ class AgenticSearch(BaseSearch):
         prompt = FAST_QUERY_ANALYSIS.format(user_input=query)
         resp = await self.llm.achat(
             messages=[{"role": "user", "content": prompt}],
-            stream=False,
+            stream=True,
         )
         self.llm_usages.append(resp.usage)
         if resp.usage and isinstance(resp.usage, dict):
@@ -2801,6 +2816,22 @@ class AgenticSearch(BaseSearch):
             initial_keywords=initial_keywords or None,
         )
         return answer, context
+
+    @staticmethod
+    def _raise_provider_failures(
+        phase_results: List[object],
+        *,
+        labels: List[str],
+        phase_label: str,
+    ) -> None:
+        """Re-raise provider/runtime failures that must not degrade to soft 'no results'."""
+        for index, result in enumerate(phase_results):
+            if not isinstance(result, OpenAIEmptyChoicesError):
+                continue
+            label = labels[index] if index < len(labels) else f"task_{index}"
+            raise OpenAIEmptyChoicesError(
+                f"{phase_label} {label} failed because the provider returned empty choices"
+            ) from result
 
     async def _build_cluster_from_context(
         self,

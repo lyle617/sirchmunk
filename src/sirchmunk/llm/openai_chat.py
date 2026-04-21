@@ -32,6 +32,10 @@ _DEFAULT_BASE_DELAY = 1.0   # seconds
 _DEFAULT_MAX_DELAY = 30.0   # seconds
 
 
+class OpenAIEmptyChoicesError(RuntimeError):
+    """Provider returned an HTTP success response with an empty ``choices`` list."""
+
+
 # ---------------------------------------------------------------------------
 # Provider capability profiles
 # ---------------------------------------------------------------------------
@@ -347,10 +351,8 @@ class OpenAIChat:
 
         if not resp.choices:
             logger.warning("[LLM] API returned empty choices list")
-            return OpenAIChatResponse(
-                content="",
-                model=resp.model or self._model,
-                usage=usage,
+            raise OpenAIEmptyChoicesError(
+                "LLM provider returned an HTTP success response with an empty choices list"
             )
 
         message = resp.choices[0].message

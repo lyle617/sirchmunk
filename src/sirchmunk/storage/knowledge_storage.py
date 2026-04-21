@@ -90,6 +90,7 @@ class KnowledgeStorage:
         self._stop_event = threading.Event()
         self._daemon_thread = None
         self._shutdown_registered = False
+        self._shutdown_complete = False
 
         # Start daemon thread and register shutdown hook
         self._start_parquet_sync_daemon(sync_interval)
@@ -281,17 +282,29 @@ class KnowledgeStorage:
 
     def _shutdown_parquet_sync(self):
         """Stop daemon thread and perform final parquet sync (called by atexit)"""
+        if self._shutdown_complete:
+            return
+        self._shutdown_complete = True
         self._stop_event.set()
         if self._daemon_thread and self._daemon_thread.is_alive():
             self._daemon_thread.join(timeout=5)
 
-        # Force a final sync regardless of dirty count
         if self._parquet_dirty_count == 0:
-            self._parquet_dirty_count = 1  # Force sync
+            return
         try:
             self._sync_to_parquet()
         except Exception as e:
             logger.error(f"Final parquet shutdown sync failed: {e}")
+
+    def close(self):
+        """Explicitly stop background sync and unregister the atexit hook."""
+        self._shutdown_parquet_sync()
+        if self._shutdown_registered:
+            try:
+                atexit.unregister(self._shutdown_parquet_sync)
+            except Exception:
+                pass
+            self._shutdown_registered = False
 
     def force_sync(self):
         """Force immediate parquet sync regardless of dirty count"""
